@@ -48,7 +48,10 @@ pub const ExecutorCount = enum(u6) {
 
     pub fn resolve(self: ExecutorCount) u6 {
         return switch (self) {
-            .auto => @intCast(@min(Executor.max_executors, std.Thread.getCpuCount() catch 1)),
+            .auto => if (builtin.single_threaded)
+                1
+            else
+                @intCast(@min(Executor.max_executors, std.Thread.getCpuCount() catch 1)),
             _ => @intFromEnum(self),
         };
     }
@@ -707,7 +710,10 @@ pub const Runtime = struct {
     shutting_down: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     const Worker = struct {
-        thread: std.Thread = undefined,
+        // In single-threaded builds there are no worker threads (resolve()
+        // returns 1, so num_workers = 0). The field is kept as `void`
+        // so std.Thread.spawn isn't even referenced at compile time.
+        thread: if (builtin.single_threaded) void else std.Thread = undefined,
         ready: os.ResetEvent = .init(),
         err: ?anyerror = null,
         executor: Executor = undefined,
@@ -743,12 +749,14 @@ pub const Runtime = struct {
 
         errdefer self.shutdownWorkers();
 
-        for (0..num_workers) |i| {
-            log.debug("Spawning worker thread {}", .{i + 1});
-            const worker = self.workers.addOneAssumeCapacity();
-            errdefer _ = self.workers.pop();
-            worker.* = .{};
-            worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(u6, @intCast(i + 1)) });
+        if (!builtin.single_threaded) {
+            for (0..num_workers) |i| {
+                log.debug("Spawning worker thread {}", .{i + 1});
+                const worker = self.workers.addOneAssumeCapacity();
+                errdefer _ = self.workers.pop();
+                worker.* = .{};
+                worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker, @as(u6, @intCast(i + 1)) });
+            }
         }
 
         for (self.workers.items, 0..) |*worker, i| {
@@ -774,9 +782,11 @@ pub const Runtime = struct {
             }
         }
 
-        // Join worker threads
-        for (self.workers.items) |*worker| {
-            worker.thread.join();
+        // Join worker threads (no-op in single-threaded — no workers exist).
+        if (!builtin.single_threaded) {
+            for (self.workers.items) |*worker| {
+                worker.thread.join();
+            }
         }
         self.workers.deinit(self.allocator);
     }

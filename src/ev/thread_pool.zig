@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Queue = @import("queue.zig").Queue;
 const Completion = @import("completion.zig").Completion;
 const Work = @import("completion.zig").Work;
@@ -38,10 +39,24 @@ pub const ThreadPool = struct {
 
     const Worker = struct {
         worker_id: u64,
-        thread: std.Thread,
+        thread: if (builtin.single_threaded) void else std.Thread,
     };
 
     pub fn init(self: *ThreadPool, allocator: std.mem.Allocator, options: Options) !void {
+        if (builtin.single_threaded) {
+            // No threads — blocking-fallback IO ops in single-threaded
+            // builds will panic at the call site rather than try to use
+            // the pool, which is correct for our use case where every
+            // op should run via the io_uring path.
+            self.* = .{
+                .allocator = allocator,
+                .min_threads = 0,
+                .max_threads = 0,
+                .idle_timeout_ns = options.idle_timeout_ms * std.time.ns_per_ms,
+                .scale_threshold = options.scale_threshold,
+            };
+            return;
+        }
         const cpu_count = try std.Thread.getCpuCount();
         const max_threads = options.max_threads orelse (cpu_count * 2);
         const min_threads = options.min_threads;
@@ -63,6 +78,7 @@ pub const ThreadPool = struct {
     }
 
     fn spawnThread(self: *ThreadPool) !void {
+        if (builtin.single_threaded) return error.ThreadQuotaExceeded;
         self.workers_mutex.lock();
         defer self.workers_mutex.unlock();
 
@@ -103,17 +119,19 @@ pub const ThreadPool = struct {
     pub fn deinit(self: *ThreadPool) void {
         self.stop();
 
-        // Join all threads - they will remove themselves from the list
-        // We need to keep joining until all workers are gone
-        while (true) {
-            self.workers_mutex.lock();
-            const thread = if (self.workers.items.len > 0) self.workers.items[0].thread else null;
-            self.workers_mutex.unlock();
+        if (!builtin.single_threaded) {
+            // Join all threads - they will remove themselves from the list
+            // We need to keep joining until all workers are gone
+            while (true) {
+                self.workers_mutex.lock();
+                const thread = if (self.workers.items.len > 0) self.workers.items[0].thread else null;
+                self.workers_mutex.unlock();
 
-            if (thread) |t| {
-                t.join();
-            } else {
-                break;
+                if (thread) |t| {
+                    t.join();
+                } else {
+                    break;
+                }
             }
         }
 

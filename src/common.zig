@@ -2,6 +2,15 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
+const builtin = @import("builtin");
+
+/// Pick an allocator for the blocking-fallback IO path. `smp_allocator`
+/// requires multi-threaded mode (it has per-CPU sharding); fall back to
+/// `page_allocator` in single-threaded builds.
+const blocking_allocator = if (builtin.single_threaded)
+    std.heap.c_allocator
+else
+    std.heap.smp_allocator;
 
 pub const log = std.log.scoped(.zio);
 
@@ -239,7 +248,7 @@ pub fn waitForIo(c: *ev.Completion) Cancelable!void {
     // Blocking path: Execute synchronously without event loop
     const task = waiter.mode.direct.task orelse {
         // TODO: Don't use std.heap.smp_allocator - it should be passed as a parameter
-        ev.executeBlocking(c, std.heap.smp_allocator);
+        ev.executeBlocking(c, blocking_allocator);
         return;
     };
 
@@ -282,7 +291,7 @@ pub fn waitForIoUncancelable(c: *ev.Completion) void {
     // Blocking path: Execute synchronously without event loop
     const task = waiter.mode.direct.task orelse {
         // TODO: Don't use std.heap.smp_allocator - it should be passed as a parameter
-        ev.executeBlocking(c, std.heap.smp_allocator);
+        ev.executeBlocking(c, blocking_allocator);
         return;
     };
 
